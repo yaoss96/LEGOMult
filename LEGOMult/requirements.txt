@@ -1,0 +1,18 @@
+# LEGOMult — Python dependencies
+#
+# The core two-step flow (Step-1 tiling + Step-2 compression) runs with the
+# Python standard library ONLY when using the greedy fallback:
+#
+#     python run_tiled.py --W 16 --booth-level 4 --max-dsp 0 --merge greedy
+#
+# For LUT-optimal ILP solutions (Step-1 and Step-2 integer programs, and the
+# single-stage baseline in run.py) install Gurobi + gurobipy. Gurobi needs a
+# license (a free academic license is available). Without it, the flow prints
+# a notice and automatically falls back to the deterministic greedy tiler /
+# greedy FA-HA merge, still emitting verified, primitive-only RTL.
+gurobipy>=10.0        # optional: enables the exact ILP solves
+
+# RTL sign-off (optional, not a Python package):
+#   * Icarus Verilog (iverilog/vvp) to simulate the emitted *_tb.v against the
+#     bundled LUT6.v / LUT6_2.v / CARRY4.v primitive models.
+#   * AMD/Xilinx Vivado for out-of-context synthesis (see synth.bat / synth.tcl).
