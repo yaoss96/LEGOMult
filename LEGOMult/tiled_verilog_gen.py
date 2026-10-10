@@ -30,6 +30,8 @@ from verilog_gen import (_emit_compressor, _emit_lutcarry_chain,
                          _build_lutcarry_chains, IGPPool, _kid_sort_key,
                          compute_init)
 from compressors import all_compressors
+from carry_prim import (carry_width, n_chunks, msb_index, emit_carry,
+                       decl_bus)
 from booth_array import emit_booth_array
 from tiles import booth_digits_needed
 
@@ -112,7 +114,8 @@ def _emit_booth_tile(f, tile, Wa, Wb, sign_a, sign_b):
                "s" if y_signed else "u", "s" if x_signed else "u"))
     f.write("  wire [%d:0] %s = %s;\n" % (mw - 1, bx, x_slice))
     f.write("  wire [%d:0] %s = %s;\n" % (mh - 1, by, y_slice))
-    nb = emit_booth_array(f, bx, by, mw, mh, x_signed, y_signed, out_base)
+    nb = emit_booth_array(f, bx, by, mw, mh, x_signed, y_signed, out_base,
+                          groups=getattr(tile, 'groups', None))
     return nb
 
 
@@ -204,22 +207,17 @@ def _emit_merge_cla(f, nCols, ppmgr, ipool, S, oipv_last, igpv_last):
                 ".I4(%s), .I5(%s));\n"
                 % (init, col, col, col, sigs[0], sigs[1], sigs[2], sigs[3],
                    sigs[4], sigs[5]))
-    nC4 = (nCols + 3) // 4
-    for c in range(nC4):
-        i0 = c * 4
-        iN = min(i0 + 4, nCols)
+    CW = carry_width()
+    for c in range(n_chunks(nCols)):
+        i0 = c * CW
+        iN = min(i0 + CW, nCols)
         slc = iN - i0
-        f.write("  wire [3:0] cy_co_%d, cy_o_%d;\n" % (c, c))
-        if slc < 4:
-            di = "{ %d'b0, cla_g[%d:%d] }" % (4 - slc, iN - 1, i0)
-            si = "{ %d'b0, cla_p[%d:%d] }" % (4 - slc, iN - 1, i0)
-        else:
-            di = "cla_g[%d:%d]" % (iN - 1, i0)
-            si = "cla_p[%d:%d]" % (iN - 1, i0)
-        ci = "1'b0" if c == 0 else "cy_co_%d[3]" % (c - 1)
-        f.write("  CARRY4 u_cy_%d (.CO(cy_co_%d), .O(cy_o_%d), .CI(%s), "
-                ".CYINIT(1'b0), .DI(%s), .S(%s));\n"
-                % (c, c, c, ci, di, si))
+        decl_bus(f, "cy_co_%d" % c, "cy_o_%d" % c)
+        db = ["cla_g[%d]" % p if p < iN else "1'b0" for p in range(i0, i0 + CW)]
+        sb = ["cla_p[%d]" % p if p < iN else "1'b0" for p in range(i0, i0 + CW)]
+        ci = "1'b0" if c == 0 else "cy_co_%d[%d]" % (c - 1, msb_index())
+        emit_carry(f, "cy_%d" % c, "cy_co_%d" % c, "cy_o_%d" % c,
+                   ci, "1'b0", db, sb)
         for k in range(slc):
             f.write("  assign r[%d] = cy_o_%d[%d];\n" % (i0 + k, c, k))
 

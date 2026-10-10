@@ -78,7 +78,10 @@ def parse(path, Wa, Wb, nCols):
             mod.elements.append(_parse_lut(s2, two=False))
             continue
         if s2.startswith('CARRY4'):
-            mod.elements.append(_parse_carry4(s2))
+            mod.elements.append(_parse_carry(s2, 4))
+            continue
+        if s2.startswith('CARRY8'):
+            mod.elements.append(_parse_carry(s2, 8))
             continue
     return mod
 
@@ -114,9 +117,15 @@ def _parse_lut(s2, two):
     return ('lut6', init, ins, p.get('O', ''))
 
 
-def _parse_carry4(s2):
+def _parse_carry(s2, width):
+    # CARRY4 / CARRY8 share .CO .O .CI .DI .S; CARRY4 adds .CYINIT while
+    # CARRY8 has .CI_TOP instead.  With CARRY_TYPE("SINGLE_CY8") the
+    # instance is one `width`-bit chain and .CI_TOP is tied low, so the
+    # emitter folds the carry-in onto .CI and CYINIT reads as zero here.
     p = _ports(s2)
-    return ('carry4', p['CO'], p['O'], p['CI'], p['CYINIT'], p['DI'], p['S'])
+    cyinit = p.get('CYINIT', "1'b0")
+    return ('carry', width, p['CO'], p['O'], p['CI'], cyinit,
+            p['DI'], p['S'])
 
 
 # --------------------------------------------------------------------------- #
@@ -266,8 +275,8 @@ def _try_eval(sim, el):
         if o5:
             _set_out(sim, o5, (init >> idx5) & 1)
         return True
-    if kind == 'carry4':
-        _, co, o, ci, cyinit, di, s = el
+    if kind == 'carry':
+        _, width, co, o, ci, cyinit, di, s = el
         if not (sim.tok_known(ci) and sim.tok_known(cyinit)
                 and sim.tok_known(di) and sim.tok_known(s)):
             return False
@@ -276,13 +285,13 @@ def _try_eval(sim, el):
         s_v, _ = sim.val(s)
         o_v = 0
         co_v = 0
-        for i in range(4):
+        for i in range(width):
             si = (s_v >> i) & 1
             o_v |= (si ^ c) << i
             c = c if si else ((di_v >> i) & 1)
             co_v |= c << i
-        sim.set_bus(o, o_v, 4)
-        sim.set_bus(co, co_v, 4)
+        sim.set_bus(o, o_v, width)
+        sim.set_bus(co, co_v, width)
         return True
     raise ValueError(kind)
 

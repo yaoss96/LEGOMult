@@ -1,0 +1,93 @@
+{
+  "design": {
+    "Wa": 32,
+    "Wb": 32,
+    "mode": "uu",
+    "sign_a": false,
+    "sign_b": false,
+    "max_dsp": 0,
+    "booth_levels": [
+      17
+    ],
+    "tiling_cost": "colcost",
+    "lut_carry": true,
+    "step2_steps_arg": null,
+    "max_chain": null,
+    "booth_groups": 1
+  },
+  "timing_s": {
+    "step1_ilp": 0.98,
+    "step2_ilp": 0.058,
+    "total": 1.038
+  },
+  "step1": {
+    "method": "ilp",
+    "n_candidates": 2,
+    "formulation": "packing",
+    "cost": 543.0,
+    "colcost": 543.0,
+    "weighted_pp_cost": 64,
+    "booth_own_lut_cost": 543,
+    "solver_obj": -139.66666666666663,
+    "mipgap": 0.0,
+    "status": 2
+  },
+  "step2": {
+    "method": "ilp",
+    "S": 2,
+    "n_compressors": 0,
+    "ct_lut": 0,
+    "n_chain_cells": 0
+  },
+  "heap": {
+    "n_cols": 64,
+    "max_height": 1,
+    "total_bits": 64
+  },
+  "ilp_estimate": {
+    "LUT6": 495,
+    "LUT6_2": 50,
+    "CARRY4": 227,
+    "DSP48": 0,
+    "est_lut_total": 545,
+    "ct_lut": 0
+  },
+  "rtl": {
+    "module": "tiled_mult_32b",
+    "file": "C:\\Users\\Razer\\Desktop\\LEGOMult\\examples\\mult_32x32_uu.v"
+  },
+  "tiling": {
+    "n_tiles": 1,
+    "counts": {
+      "BOOTH": 1
+    },
+    "booth_levels": {
+      "17": 1
+    },
+    "tiles": [
+      {
+        "kind": "BOOTH",
+        "a_rows": [
+          0,
+          31
+        ],
+        "b_cols": [
+          0,
+          31
+        ],
+        "h": 32,
+        "w": 32,
+        "area": 1024,
+        "sign_mode": "uu",
+        "booth_level": 17,
+        "booth_axis": "a",
+        "multiplicand_width": 32,
+        "out_cols": [
+          0,
+          63
+        ],
+        "role": "IGP (opaque result word)"
+      }
+    ]
+  }
+}

@@ -66,7 +66,9 @@ catch { opt_design -quiet }
 
 # ---- count REAL primitives after optimisation --------------------------------
 set nlut   [llength [get_cells -hier -filter {REF_NAME =~ LUT*}]]
-set ncarry [llength [get_cells -hier -filter {REF_NAME =~ CARRY*}]]
+# Versal names the hard carry primitive LOOKAHEAD8, not CARRY*, so a
+# CARRY-only filter silently reports zero carry usage on that fabric.
+set ncarry [llength [get_cells -hier -filter {REF_NAME =~ CARRY* || REF_NAME =~ LOOKAHEAD*}]]
 set ndsp   [llength [get_cells -hier -filter {REF_NAME =~ DSP*}]]
 set nff    [llength [get_cells -hier -filter {REF_NAME =~ FD*}]]
 

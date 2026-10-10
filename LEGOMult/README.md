@@ -141,6 +141,143 @@ python -m pytest tests/
 For RTL sign-off, run `test_tiled.bat` (iverilog) or simulate the emitted `*_tb.v`
 in Vivado.
 
+## How many LUTs a Booth level really costs
+
+A level of a band is one LUT6 per row bit, each driving the propagate input of
+one carry bit. Two details decide how many row bits there are, and both are
+worth about three percent of a 32-bit design.
+
+**Row width depends on the multiplicand's sign.** A level contributes `d·X`
+with the radix-4 digit `d ∈ {-2..2}`. For a two's-complement multiplicand that
+value fits in `w+1` bits, so the row's most significant bit *is* its sign and
+the folded Baugh–Wooley complement goes there. For an unsigned multiplicand
+`2X` alone already needs `w+1` bits, so the sign takes a cell of its own and
+the row is `w+2` wide. Taking the unsigned width in both modes spends one LUT
+per level for nothing. `booth_array.row_top(w, x_signed)` is the one place
+this is decided; `set_narrow_signed_row(False)` restores the wide row if you
+want to measure the difference.
+
+**The companion LUT5 is free, so two row bits can share a LUT6.** A LUT6 is
+two LUT5s over five shared inputs. A cell needs its own LUT5 for the
+propagate term, but the carry cell's *data* input is the running sum, which is
+already a signal and reaches the carry logic through the slice bypass — so the
+second LUT5 is unused. Two adjacent row bits therefore occupy one LUT6 site
+whenever they are together a function of five inputs or fewer, and both halves
+keep the carry chain because each LUT5 still drives its own carry bit. Two
+places in a band qualify:
+
+| where | why it fits in five inputs | 32×32 |
+|---|---|---|
+| the first digit | the recoding window's low member is zero and the running sum is still the folding constant: 2 window bits + 3 multiplicand bits | 34 → 17 cells |
+| the last digit of an **unsigned** multiplier | the window is constant but for the operand's top bit, so the row is a plain AND: 1 + 2 multiplicand bits + 2 accumulated bits | 32 → 16 cells |
+
+Everywhere else the window, two multiplicand bits and two accumulated bits
+come to eight and the cells stay apart. `_pair_support()` takes the support
+from the truth table rather than from the symbols, because a row bit is
+*written* as a function of both `x_n` and `x_{n-1}` even where the digit
+cannot select the shifted operand — counting symbols misses the last-digit
+case. `set_pair_cells(False)` turns the pairing off.
+
+Measured on the Kintex-7 xc7k70tfbv484-3, logic only, combinational:
+
+| 32×32 | plain | narrow row | pairing | both |
+|---|---|---|---|---|
+| unsigned | 576 | 576 | 543 | **543** |
+| signed | 544 | 528 | 527 | **512** |
+
+**Both changes are exact** and are covered by the regression in
+`python booth_array.py`: the emulator is checked exhaustively (2,072,640 cases
+over `w ≤ 7`, `h ≤ 10`, all four sign modes) and the emitted netlist is
+simulated against `a*b`.
+
+Because neither property is uniform over the tile set, the structural term of
+the Step-1 cost is no longer the closed form `L(k+1)`. `booth_tile_cost()`
+calls `booth_array.band_lut_cost()`, which runs the emitter's cell assignment
+and memoises the answer, so the tiling program prices the cost the netlist
+will actually have. The saving falls on the ends of a band, which is why it
+favours few wide bands over many narrow ones.
+
+## Area--delay control: Booth band level grouping
+
+A Booth band's Type-A LUT fuses the Booth select with the addition into the
+running sum. That is what makes a level cost one LUT per multiplicand bit --
+and what makes the `L` levels strictly serial, so a full-width band on a 32-bit
+operand is seventeen carry-propagate adds deep. On a logic-only design that
+depth, not the compressor tree and not the final adder, is most of the critical
+path: bounding every Step-2 carry chain from 34 cells to 2 moves the measured
+32x32 delay by 1.4%, while splitting the band moves it by 54%.
+
+`--booth-groups G` splits the levels into `G` groups, each accumulated on its
+own chain, the group sums recombined in a tree:
+
+| | cost | depth |
+|---|---|---|
+| `G = 1` (the plain array) | `band_lut_cost()` LUTs (see above) | `L` adds |
+| `G` groups | `+ (G-1)(nb-L)` LUTs | `⌈L/G⌉ + ⌈log2 G⌉` adds |
+
+`G = 1` emits the identical netlist, which is how the change is regression
+tested (`python booth_array.py` runs both the emulator and the emitted netlist
+exhaustively, for `G = 1..4`).
+
+The grouping is a property of a **candidate tile**, not a global switch, so
+Step 1 prices it: `solve_tiling(..., booth_groups=(1,2,3,4,6),
+max_tile_depth=D)` keeps only candidates whose band fits under `D` and
+minimises area over the rest. Sweeping `D` traces an area--delay front every
+point of which is optimal for its own depth:
+
+```bash
+python run_depth_exp.py --W 32 --mode uu --depths 0,200,160,128,112,96 \
+                        --min-booth 1
+```
+
+Measured on the Kintex-7, the trade improves monotonically with operand width:
+at 16 bits `G = 4` costs about +49% LUTs for -40% delay, and at 48 bits +19%
+for -61%. It is therefore worth little on narrow operands. `--min-booth 1` is
+needed at tight depth bounds because the bound constrains the **band only** --
+without it the solver escapes by choosing an all-LUT tiling, whose Step-2
+program does not solve at 32 bits.
+
+## Compressor-tree benchmark (`bench_B.py`)
+
+Step 2 on its own is a bit-heap compressor generator, so it can be compared
+directly against that literature. `bench_B.py` runs it on the published
+benchmark shapes of Hoßfeld *et al.* (ACM TRETS 17(2):30, 2024) -- `(128)`,
+`(256)`, `(512)`, `(128,128)`, `(256,256)`, `(512,512)` and `Mul16` -- and
+emits RTL with the `(a, b, r)` port convention the rest of the flow uses, so
+`synth.tcl` and `verilog_sim.py` work on it unchanged.
+
+```bash
+python bench_B.py --shape all --mode external --out bench_out
+python bench_B_synth.py --part xc7vh870tflg1932-2 --smode reg
+```
+
+Three input modes, and **only the first is comparable with published numbers**:
+
+* `external` -- every matrix bit is a primary input, which is what that
+  literature measures.
+* `absorbed` -- `Mul16` as a real 16x16 multiplication with the AND gates
+  consumed inside the compressor LUTs (the ungenerated partial products).
+* `gates` -- the same multiplication with the AND gates materialised.
+
+`absorbed` and `gates` both include partial-product generation, which the
+published numbers exclude; they are comparable with *each other*, and that pair
+is what measures absorption (396 -> 189 LUTs, a 52.3% reduction).
+`bench_B_synth.py` refuses to print a comparison for them.
+
+## Carry primitives across fabrics (`carry_prim.py`)
+
+One module decides the carry primitive for the whole flow, so a design can be
+retargeted without touching the ILPs: `CARRY4` on 7-series, `CARRY8` on
+UltraScale+, and `LOOKAHEAD8` on Versal. `run_tiled.py --part <part>` selects
+it. Two traps worth knowing:
+
+* `CARRY8` needs `CARRY_TYPE("SINGLE_CY8")` and `CI_TOP` tied low, or the
+  chain silently splits in two.
+* Versal reports carry usage as `LOOKAHEAD8`, not `CARRY*`; a `CARRY*`-only
+  filter reports zero. It also charges `LUTCY` carry fractures to the LUT
+  budget, so its headline LUT figure is not comparable with the 7-series one
+  even though the logic LUT count is lower.
+
 ## File overview
 
 | file | role |

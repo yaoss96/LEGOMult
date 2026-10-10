@@ -29,6 +29,7 @@ import re
 import time
 
 from tiling_ilp import solve_tiling, summarize_tiling
+from carry_prim import set_carry_width, set_carry_for_part, carry_name
 from merge_ilp import build_heap, solve_merge, greedy_merge, simulate_merge_state
 from tiled_verilog_gen import emit_tiled_verilog, emit_tiled_testbench
 
@@ -38,12 +39,15 @@ def parse_args():
     p.add_argument("--W", type=int, default=None, help="symmetric width (Wa=Wb=W)")
     p.add_argument("--Wa", type=int, default=None)
     p.add_argument("--Wb", type=int, default=None)
-    p.add_argument("--booth-level", type=int, default=4, choices=[3, 4, 5, 6, 7],
-                   help="Booth-Array level L (height 2L-1 unsigned / 2L signed)")
+    p.add_argument("--booth-level", type=int, default=4,
+                   help="Booth-Array level L (height 2L-1 unsigned / 2L signed). "
+                        "L is not capped: L = ceil(W/2) makes a single band cover "
+                        "the whole encoded axis (full-width Booth array).")
     p.add_argument("--booth-levels", type=str, default=None,
-                   help="MIX Booth levels: e.g. '34567', '3,4,5,6,7', or 'mix'/"
-                        "'all' (=3..7).  Overrides --booth-level; the ILP may use "
-                        "a different level per region.")
+                   help="MIX Booth levels: e.g. '34567', '3,4,5,6,7', 'mix'/'all' "
+                        "(=3..7), 'full' (=3..ceil(W/2), i.e. up to a full-width "
+                        "band), or a range '3-16'.  Overrides --booth-level; the "
+                        "ILP may use a different level per region.")
     p.add_argument("--max-dsp", type=int, default=0,
                    help="DSP48 budget for Step 1 (0 = logic only)")
     p.add_argument("--sign-a", action="store_true")
@@ -53,12 +57,33 @@ def parse_args():
                    help="Step-2 method: auto = ILP then greedy fallback")
     p.add_argument("--no-lut-carry", action="store_true",
                    help="disable Table-II LUT-CarryChain compressors in the merge")
+    p.add_argument("--booth-groups", dest="booth_groups", type=int, default=1,
+                   help="split each Booth band's levels into this many groups, "
+                        "accumulated separately and recombined in a tree. The "
+                        "band is otherwise a serial ripple of L adds and is "
+                        "what the critical path of a wide design is mostly "
+                        "made of. 1 = the original array.")
+    p.add_argument("--max-chain", dest="max_chain", type=int, default=None,
+                   help="bound the length of any Step-2 carry chain, in cells. "
+                        "This is the delay handle: (O2) counts LUTs only, so "
+                        "without it the solver will run one chain across the "
+                        "heap to save a cell and the critical path is the "
+                        "carry propagating along it. Sweep it for an "
+                        "area-delay front. >= 2; omit for unbounded.")
     p.add_argument("--step2-steps", "--merge-S", dest="step2_steps", type=int,
                    default=None, metavar="S",
                    help="Step-2 (merge) reduction-step budget S; default = auto. "
                         "Smaller S forces a shallower, wider tree (lower latency, "
                         "more LUTs); the solver still escalates from S if that many "
                         "steps are infeasible. Use to sweep the area-latency Pareto.")
+    p.add_argument("--carry-width", type=int, default=None, choices=[4, 8],
+                   help="hard-carry primitive granularity: 4 = CARRY4 "
+                        "(7-series), 8 = CARRY8 (UltraScale+/Versal). "
+                        "Default: inferred from --part, else 4.")
+    p.add_argument("--part", type=str, default=None,
+                   help="target Vivado part (e.g. xcvc1902-vsva2197-2MP-e-S). "
+                        "Only used to pick the carry primitive; it does not "
+                        "invoke Vivado.")
     p.add_argument("--out", type=str, default=None, help="output .v path")
     p.add_argument("--time-limit", type=int, default=600)
     p.add_argument("--mip-gap", type=float, default=1e-3)
@@ -95,7 +120,8 @@ def count_primitives(path):
     return {
         'LUT6':   len(re.findall(r'\bLUT6\b(?!_)', txt)),
         'LUT6_2': len(re.findall(r'\bLUT6_2\b', txt)),
-        'CARRY4': len(re.findall(r'\bCARRY4\b', txt)),
+        'CARRY4': (len(re.findall(r'\bCARRY4\b', txt))
+                   + len(re.findall(r'\bCARRY8\b', txt))),
         'DSP48':  len(re.findall(r'use_dsp', txt)),
     }
 
@@ -137,6 +163,8 @@ def _write_report(path, Wa, Wb, sign_a, sign_b, mode, a, levels,
             "max_dsp": a.max_dsp, "booth_levels": levels,
             "tiling_cost": a.tiling_cost, "lut_carry": (not a.no_lut_carry),
             "step2_steps_arg": a.step2_steps,
+            "max_chain": a.max_chain,
+            "booth_groups": a.booth_groups,
         },
         "timing_s": {
             "step1_ilp": round(step1_time, 3),
@@ -183,23 +211,52 @@ def _write_report(path, Wa, Wb, sign_a, sign_b, mode, a, levels,
 def main():
     a = parse_args()
     Wa, Wb = resolve_widths(a)
+    # Pick the hard-carry primitive before any RTL is emitted: explicit
+    # --carry-width wins, else infer it from --part, else keep CARRY4.
+    if a.carry_width is not None:
+        set_carry_width(a.carry_width)
+    elif a.part:
+        set_carry_for_part(a.part)
     sign_a = a.sign_a or a.signed
     sign_b = a.sign_b or a.signed
     mode = ('s' if sign_a else 'u') + ('s' if sign_b else 'u')
     # Booth level(s): single (--booth-level) or MIXED (--booth-levels)
+    # A level-L band covers 2L-1 (unsigned) / 2L (signed) rows of the encoded
+    # axis, so L_full = ceil(max(Wa,Wb)/2) is the smallest level whose single
+    # band spans the whole axis: at L >= L_full the tile set contains the
+    # monolithic full-width Booth array as one candidate tile.
+    # unsigned Y of a level-L band is 2L-1 wide, signed 2L, so the smallest
+    # level that spans a W-row axis in *either* sign mode is ceil((W+1)/2).
+    L_full = (max(Wa, Wb) + 2) // 2
     if a.booth_levels:
         s = a.booth_levels.strip().lower()
         if s in ('mix', 'all'):
             levels = [3, 4, 5, 6, 7]
+        elif s == 'full':
+            levels = list(range(3, L_full + 1))
+        elif '-' in s:                      # inclusive range, e.g. '3-16'
+            lo, hi = (int(x) for x in s.split('-', 1))
+            levels = list(range(lo, hi + 1))
         elif ',' in s or ' ' in s:
             levels = sorted({int(x) for x in s.replace(',', ' ').split()})
-        else:                               # contiguous digits e.g. "34567"
+        elif s.isdigit() and 2 <= int(s) <= L_full:
+            # a bare number that is itself a legal level means THAT level, so
+            # '17' is level 17 and not the digit pair {1, 7}.
+            levels = [int(s)]
+        else:                               # contiguous digits e.g. '34567'
             levels = sorted({int(c) for c in s})
     else:
         levels = [a.booth_level]
-    for lv in levels:
-        if lv not in (3, 4, 5, 6, 7):
-            raise SystemExit("booth level %d out of range 3..7" % lv)
+    # Drop levels whose band cannot fit the board instead of aborting, so one
+    # sweep spec ('mix', 'full', '3-17', ...) is usable at every width.
+    kept = [lv for lv in levels if 2 <= lv <= L_full]
+    if not kept:
+        raise SystemExit("no usable booth level in %s: admissible range is "
+                         "2..%d for W=%d" % (levels, L_full, max(Wa, Wb)))
+    if kept != levels:
+        print("[Step 1] booth levels %s -> %s (L_full=%d for W=%d)"
+              % (levels, kept, L_full, max(Wa, Wb)))
+    levels = kept
     L_arg = levels if len(levels) > 1 else levels[0]       # int or list to solver
     Ltag = "".join(str(x) for x in levels) if len(levels) > 1 else str(levels[0])
     verbose = not a.quiet
@@ -229,6 +286,9 @@ def main():
     print("[Step 1] time %.2fs" % step1_time)
 
     # ---------------- Step 2 : merge ----------------
+    import booth_array
+    booth_array.set_groups(a.booth_groups)
+
     heap = build_heap(tiles, Wa, Wb, sign_a, sign_b)
     print("\n[Step 2] merge heap: %d columns, max height %d, total bits %d"
           % (heap.nCols, heap.max_height(), sum(heap.total_heights())))
@@ -238,6 +298,7 @@ def main():
         try:
             merge_res = solve_merge(heap, S=a.step2_steps,
                                     use_lut_carry=not a.no_lut_carry,
+                                    max_chain=a.max_chain,
                                     threads=a.threads, time_limit=a.time_limit,
                                     mip_gap=a.mip_gap, verbose=verbose)
         except Exception as e:
@@ -263,9 +324,10 @@ def main():
     prims = count_primitives(a.out)
     print("\n[RTL] module %s -> %s" % (modname, a.out))
     print("[RTL] testbench -> %s" % tb)
-    print("[RTL] primitives: %d LUT6 + %d LUT6_2 + %d CARRY4 + %d DSP48  "
+    print("[RTL] primitives: %d LUT6 + %d LUT6_2 + %d %s + %d DSP48  "
           "(~%d LUTs total)"
-          % (prims['LUT6'], prims['LUT6_2'], prims['CARRY4'], prims['DSP48'],
+          % (prims['LUT6'], prims['LUT6_2'], prims['CARRY4'], carry_name(),
+             prims['DSP48'],
              prims['LUT6'] + prims['LUT6_2']))
 
     # ---------------- machine-readable report (times, estimate, partition) ----

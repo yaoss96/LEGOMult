@@ -1,0 +1,45 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Generated multiplier RTL + testbenches.  examples/ is exempt: the eight
+# designs there are committed on purpose, as a reference to check against.
+tiled_mult_*.v
+ilp_mult_*.v
+mult*.v
+*_tb.v
+!examples/*.v
+
+# Generated reports / logs
+*.log
+*.jou
+report.json
+!examples/*.json
+*_util.txt
+*_cpd.txt
+synth_results.txt
+
+# Vivado / synthesis working dirs
+.Xil/
+*.cache/
+*.runs/
+*.sim/
+synth_*/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Experiment outputs: the result CSVs are committed under data/, everything
+# else these campaigns write (netlists, per-design JSON, Vivado reports) is
+# regenerable and stays out
+bench_out/
+group_out/
+depth_out/
+chain_sweep/
+group_sweep/
+revision_out/
+*_metrics.txt
+*_power.txt

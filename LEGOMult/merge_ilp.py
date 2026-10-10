@@ -130,30 +130,43 @@ def _kid_sort_key(kid):
 
 
 def solve_merge(heap, S=None, use_lut_carry=True,
-                alpha_lut=1.0, gamma_carry=0.0,
+                alpha_lut=1.0, gamma_carry=0.0, max_chain=None,
                 threads=8, time_limit=600, mip_gap=1e-3, verbose=True,
                 max_extra_steps=6):
     """Solve the compressor-tree ILP for the merged heap, auto-escalating the
     number of reduction steps S until a feasible tree is found.  Returns a
-    result dict (comps, final residue OIPV/IGPV, costs)."""
+    result dict (comps, final residue OIPV/IGPV, costs).
+
+    max_chain bounds the LENGTH of any carry chain, in cells.  It is the delay
+    handle: the objective counts LUTs and knows nothing about time, so without
+    it the solver is free to run one chain across the whole heap to save a cell,
+    and carry propagation along that chain is what the critical path is made of.
+    Tightening it forces shallower chains, which usually costs steps and LUTs --
+    sweeping it traces an area-delay front that is optimised at every point
+    rather than sampled.  None leaves chains unbounded (the original model).
+    Chains always span at least two columns, so values below 2 are meaningless.
+    """
     if S is None:
         S = max(2, heap.max_height().bit_length() + 1)
+    if max_chain is not None and max_chain < 2:
+        raise ValueError("max_chain must be >= 2 (a chain spans >= 2 columns)")
     last = None
     for extra in range(max_extra_steps + 1):
         res = _solve_merge_once(heap, S + extra, use_lut_carry, alpha_lut,
                                 gamma_carry, threads, time_limit, mip_gap,
-                                verbose)
+                                verbose, max_chain)
         if res is not None:
             return res
         last = S + extra
-    raise RuntimeError("merge ILP not solved up to S=%d (heap max height %d): "
-                       "infeasible, OR the model exceeds the restricted-license "
-                       "size limit -- use a full Gurobi license, or --merge greedy"
-                       % (last, heap.max_height()))
+    raise RuntimeError("merge ILP not solved up to S=%d (heap max height %d, "
+                       "max_chain=%s): infeasible, OR the model exceeds the "
+                       "restricted-license size limit -- use a full Gurobi "
+                       "license, or --merge greedy"
+                       % (last, heap.max_height(), max_chain))
 
 
 def _solve_merge_once(heap, S, use_lut_carry, alpha_lut, gamma_carry,
-                      threads, time_limit, mip_gap, verbose):
+                      threads, time_limit, mip_gap, verbose, max_chain=None):
     import gurobipy as gp
     from gurobipy import GRB
 
@@ -247,6 +260,29 @@ def _solve_merge_once(heap, S, use_lut_carry, alpha_lut, gamma_carry,
                     model.addConstr(active[i, j] == active[i, j - 1] + I_cnt - III_cnt, name='ccb_%d_%d' % (i, j))
             model.addConstr(active[i, nCols - 1] == 0, name='cct_%d' % i)
 
+        # ---- chain-length bound : the delay handle -----------------------
+        # Chains are interchangeable in this aggregate model, so "no chain is
+        # longer than D cells" is exactly "every chain opened at or before
+        # column j is closed by column j+D-1", which counts heads against
+        # tails over a sliding window.  Linear, and S*nCols constraints.
+        if max_chain is not None:
+            for i in range(S):
+                heads = [gp.quicksum(Comp[k, i, c] for k in head_idx)
+                         for c in range(nCols)]
+                tails = [gp.quicksum(Comp[k, i, c] for k in tail_idx)
+                         for c in range(nCols)]
+                for j in range(nCols):
+                    end = min(j + max_chain - 1, nCols - 1)
+                    if end >= nCols - 1:
+                        break          # implied by active[i, nCols-1] == 0
+                    model.addConstr(
+                        gp.quicksum(heads[c] for c in range(j + 1))
+                        <= gp.quicksum(tails[c] for c in range(end + 1)),
+                        name='chainlen_%d_%d' % (i, j))
+    elif max_chain is not None:
+        raise ValueError("max_chain requires the LUT+carry chain library "
+                         "(use_lut_carry=True)")
+
     try:
         model.optimize()
     except gp.GurobiError as e:
@@ -269,13 +305,51 @@ def _solve_merge_once(heap, S, use_lut_carry, alpha_lut, gamma_carry,
     Inter_v = [[int(round(Inter[s, j].X)) for j in range(nCols)] for s in range(S + 1)]
     ct_cost = sum(comps[c['kid']]['cost'] for c in flat)
     n_chain = sum(1 for c in flat if c['kid'] in CHAIN_KIDS_ALL)
+    lens = chain_lengths(flat)
+    longest = max(lens) if lens else 0
+    if max_chain is not None and longest > max_chain:
+        raise AssertionError("chain-length bound violated: %d > %d"
+                             % (longest, max_chain))
     return {
         'nCols': nCols, 'S': S, 'comps': flat,
         'OIPV': Input_v, 'IGPV': Inter_v,
         'ct_cost': ct_cost, 'n_chain_cells': n_chain,
+        'max_chain': max_chain, 'longest_chain': longest,
+        'chain_depth': sum(_step_longest(flat, s) for s in range(S)),
         'objval': model.ObjVal, 'mipgap': model.MIPGap, 'status': model.Status,
         'method': 'ilp',
     }
+
+
+def chain_lengths(flat):
+    """Length in cells of every carry chain in a solved schedule.
+
+    Chains are rebuilt the way the emitter rebuilds them: within one step, walk
+    the columns left to right, a head opens a chain and a tail closes the one
+    that has been open longest.  The aggregate ILP variables do not name chains,
+    so this is what "the longest chain" actually means in the emitted netlist.
+    """
+    out = []
+    by_step = {}
+    for c in flat:
+        if c['kid'] in CHAIN_KIDS_ALL:
+            by_step.setdefault(c['step'], []).append(c)
+    for step, cells in by_step.items():
+        open_at = []
+        for col in sorted(set(c['col'] for c in cells)):
+            here = [c for c in cells if c['col'] == col]
+            for c in here:
+                if c['kid'] in CHAIN_KIDS_HEAD:
+                    open_at.append(col)
+            for c in here:
+                if c['kid'] in CHAIN_KIDS_TAIL and open_at:
+                    out.append(col - open_at.pop(0) + 1)
+    return out
+
+
+def _step_longest(flat, step):
+    lens = chain_lengths([c for c in flat if c['step'] == step])
+    return max(lens) if lens else 0
 
 
 # =============================================================================

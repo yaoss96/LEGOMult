@@ -15,6 +15,8 @@ Top-level structure (matches paper Fig.4):
            result MSB r[2W-1] = last CARRY4.CO[ ... ]
 """
 
+from carry_prim import (carry_width, n_chunks, msb_index, emit_carry,
+                       decl_bus)
 from compressors import (PURE_LUT_COMPRESSORS, all_compressors,
                          compressor_paper_label,
                          chain_base_kid, chain_oip_count,
@@ -447,7 +449,8 @@ def _emit_lutcarry_chain(f, chain, pp_mgr, igp_pool, uid):
     """
     step = chain[0]['step']
     L = len(chain)
-    nCY = (L + 3) // 4
+    CW = carry_width()
+    nCY = n_chunks(L)
 
     if chain_base_kid(chain[0]['kid']) != 'cI':
         raise ValueError('chain head must be cI[_o*], got %s' % chain[0]['kid'])
@@ -530,15 +533,15 @@ def _emit_lutcarry_chain(f, chain, pp_mgr, igp_pool, uid):
     # Emit CARRY4s, packing 4 cells per instance.
     cy_co_wires = []
     for c in range(nCY):
-        idx0 = c * 4
-        idxN = min(idx0 + 4, L)
+        idx0 = c * CW
+        idxN = min(idx0 + CW, L)
         slc = idxN - idx0
         cy_co = 'cy_co_%s_%d' % (uid, c)
         cy_o  = 'cy_o_%s_%d'  % (uid, c)
-        f.write('  wire [3:0] %s, %s;\n' % (cy_co, cy_o))
+        decl_bus(f, cy_co, cy_o)
         s_terms = []
         d_terms = []
-        for k in range(4):
+        for k in range(CW):
             if k < slc:
                 cd = cell_data[idx0 + k]
                 s_terms.append(cd['par_wire'])
@@ -546,19 +549,14 @@ def _emit_lutcarry_chain(f, chain, pp_mgr, igp_pool, uid):
             else:
                 s_terms.append("1'b0")
                 d_terms.append("1'b0")
-        s_concat = '{ %s, %s, %s, %s }' % (s_terms[3], s_terms[2], s_terms[1], s_terms[0])
-        d_concat = '{ %s, %s, %s, %s }' % (d_terms[3], d_terms[2], d_terms[1], d_terms[0])
         if c == 0:
             ci_port    = "1'b0"
             cyinit_port = "1'b0"
         else:
-            ci_port    = '%s[3]' % cy_co_wires[-1]
+            ci_port    = '%s[%d]' % (cy_co_wires[-1], msb_index())
             cyinit_port = "1'b0"
-        f.write("  CARRY4 u_%s_cy_%d (\n"
-                "    .CO(%s), .O(%s),\n"
-                "    .CI(%s), .CYINIT(%s),\n"
-                "    .DI(%s), .S(%s));\n"
-                % (uid, c, cy_co, cy_o, ci_port, cyinit_port, d_concat, s_concat))
+        emit_carry(f, '%s_cy_%d' % (uid, c), cy_co, cy_o,
+                   ci_port, cyinit_port, d_terms, s_terms)
         cy_co_wires.append(cy_co)
         for k in range(slc):
             cd = cell_data[idx0 + k]

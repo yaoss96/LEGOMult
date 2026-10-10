@@ -104,7 +104,9 @@ def tile_own_cost(t):
         return lut_tile_cost(t.h, t.w)
     if t.kind == 'BOOTH':
         k = t.w if t.booth_axis == 'a' else t.h
-        return booth_tile_cost(t.level, k)             # structural L*(k+1)
+        # structural L*(k+1), plus the recombination of the band's level groups
+        return booth_tile_cost(t.level, k, getattr(t, 'groups', None) or 1,
+                               t.h + t.w, tile=t)
     if t.kind == 'DSP':
         return 0                                       # constrained by budget
     raise ValueError(t.kind)
@@ -391,7 +393,8 @@ def solve_tiling(Wa, Wb, sign_a=False, sign_b=False,
                  threads=8, verbose=True, booth_max_k=None,
                  use_lut_carry=True, cost_model='colcost',
                  formulation='packing', booth_band_align=True,
-                 booth_width_prune=True):
+                 booth_width_prune=True,
+                 booth_groups=None, max_tile_depth=None, min_booth=0):
     """Return (tiles, info).  tiles is an exact cover of the board.
 
     formulation='packing' (default, scalable): variables are ONLY the hard
@@ -408,10 +411,13 @@ def solve_tiling(Wa, Wb, sign_a=False, sign_b=False,
         allow_dsp=(max_dsp > 0), booth_max_k=booth_max_k,
         include_lut=(not packing),
         booth_band_align=(booth_band_align and packing),
-        booth_width_prune=(booth_width_prune and packing))
+        booth_width_prune=(booth_width_prune and packing),
+        booth_groups=booth_groups, max_tile_depth=max_tile_depth)
     info = {'n_candidates': len(cands), 'method': None,
             'booth_level': booth_level, 'max_dsp': max_dsp,
-            'formulation': formulation}
+            'formulation': formulation,
+            'booth_groups': (list(booth_groups) if booth_groups else None),
+            'max_tile_depth': max_tile_depth}
 
     if not use_gurobi:
         tiles = greedy_tiling(Wa, Wb, sign_a, sign_b, booth_level, max_dsp)
@@ -465,6 +471,20 @@ def solve_tiling(Wa, Wb, sign_a=False, sign_b=False,
         if dsp_idx:
             m.addConstr(gp.quicksum(x[ti] for ti in dsp_idx) <= max_dsp,
                         name="dsp_budget")
+        # Keep a band in the solution when the caller asks for one.  Under a
+        # tight depth ceiling the objective would otherwise escape by choosing
+        # no band at all: the (2/3)*area credit prices an all-LUT residual as
+        # though Step 2 could always compress it, and at 32 bits it cannot --
+        # that heap reaches height 32 and the Step-2 program does not solve.
+        # The ceiling constrains band depth only, so without this the sweep
+        # walks off the end of the model rather than tightening the design.
+        if min_booth:
+            booth_idx = [ti for ti, t in enumerate(cands) if t.kind == 'BOOTH']
+            if not booth_idx:
+                raise ValueError("min_booth=%d but no Booth candidate survives "
+                                 "the depth ceiling" % min_booth)
+            m.addConstr(gp.quicksum(x[ti] for ti in booth_idx) >= min_booth,
+                        name="min_booth")
 
         # ---- objective ----
         if packing and cost_model == 'colcost':

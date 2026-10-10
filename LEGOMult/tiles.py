@@ -143,13 +143,22 @@ class Tile(object):
                    (the multiplier); the other is the multiplicand.
       level    : for BOOTH only -- Booth level L.
     """
-    __slots__ = ('kind', 'i0', 'i1', 'j0', 'j1', 'booth_axis', 'level')
+    __slots__ = ('kind', 'i0', 'i1', 'j0', 'j1', 'booth_axis', 'level',
+                 'groups')
 
-    def __init__(self, kind, i0, i1, j0, j1, booth_axis=None, level=None):
+    def __init__(self, kind, i0, i1, j0, j1, booth_axis=None, level=None,
+                 groups=None):
         self.kind = kind
         self.i0, self.i1, self.j0, self.j1 = i0, i1, j0, j1
         self.booth_axis = booth_axis
         self.level = level
+        # BOOTH only: into how many serially-accumulated level groups the band
+        # is split before its partial sums are recombined in a tree.  1 is the
+        # plain serial array; higher values cost adds and buy depth, which is
+        # what makes the band's internal ripple visible to Step 1.  None means
+        # the tile expresses no preference and the emitter's module-level
+        # default applies, so tiles built outside Step 1 behave as before.
+        self.groups = groups
 
     # geometry -----------------------------------------------------------------
     @property
@@ -208,6 +217,28 @@ def booth_level_max_height(level, signed):
     """Max Booth-encoded operand height for a given level."""
     # signed: 2L ; unsigned: 2L-1   (matches paper Table III/IV: L3->6/5 ...)
     return 2 * level if signed else 2 * level - 1
+
+
+def booth_level_unsigned_heights(level):
+    """Unsigned band heights that need exactly `level` radix-4 digits.
+
+    booth_digits_needed(h, False) = (h + 2) // 2, so h in {2L-2, 2L-1} both
+    map to L digits and therefore cost the same L*(k+1) LUTs.  Keeping both
+    in the tile set lets one level tile an axis of either parity exactly."""
+    return [h for h in (2 * level - 2, 2 * level - 1) if h >= 1]
+
+
+def booth_level_signed_heights(level):
+    """Signed band heights that need exactly `level` radix-4 digits.
+
+    booth_digits_needed(h, True) = (h + 1) // 2, so h in {2L-1, 2L}."""
+    return [h for h in (2 * level - 1, 2 * level) if h >= 1]
+
+
+def booth_level_heights(level):
+    """Union of the admissible signed and unsigned heights of a level."""
+    return sorted(set(booth_level_unsigned_heights(level))
+                  | set(booth_level_signed_heights(level)))
 
 
 # Booth encoder (paper Table II): triplet (y_{2m+1}, y_2m, y_{2m-1}) -> flags.
@@ -488,40 +519,106 @@ def lut_max_shape_for_booth_level(level):
     return booth_level_max_height(level, False)
 
 
-def booth_tile_cost(level, k):
-    """Paper Table III costmult_t for a level-L Booth array of free width k.
-       L3:3(k+1) L4:4(k+1) L5:5(k+1) L6:6(k+1) L7:7(k+1)."""
-    return level * (k + 1)
+def booth_tile_cost(level, k, groups=1, nb=None, tile=None):
+    """Paper Table III costmult_t for a level-L Booth array of free width k,
+       L3:3(k+1) L4:4(k+1) ... plus the recombination of its level groups.
+
+    Splitting the L levels into G groups leaves the fused select-and-add cost
+    inside a group untouched and adds G-1 carry-propagate adds over the band's
+    output, one LUT per bit each.  A group that starts at level m carries 2m
+    constant low bits that fold out of its recombination, and averaging that
+    over the groups gives (G-1)*(nb-L) rather than (G-1)*nb.  The difference is
+    not cosmetic: nb per group overestimates by about 30% and that was enough to
+    make Step 1 reject grouped bands it should have taken.  Against the measured
+    campaign the estimate lands within ~5% at every width (W=16/24/32/48:
+    23/35/47/71 predicted against 24.6/38.6/50/77 measured per extra group).
+
+    The structural term is taken from the emitter itself when the tile is
+    known, because the row width depends on the multiplicand's sign and the
+    first and last digit share a LUT between two row bits; L*(k+1) is the
+    worst case of that and is kept for callers that have only the shape.
+    """
+    base = level * (k + 1)
+    if tile is not None:
+        try:
+            from booth_array import band_lut_cost
+            mh = tile.h if tile.booth_axis == 'a' else tile.w
+            mw = tile.w if tile.booth_axis == 'a' else tile.h
+            xs, ys = _tile_band_signs(tile)
+            base = band_lut_cost(mw, mh, xs, ys, 1)
+        except Exception:                                     # noqa: BLE001
+            base = level * (k + 1)
+    G = max(1, int(groups))
+    if G == 1 or not nb:
+        return base
+    return base + (G - 1) * max(1, nb - level)
+
+
+def _tile_band_signs(tile):
+    """(multiplicand signed, multiplier signed) for a Booth tile.
+
+    The sign mode is stored as the two operand letters, and booth_axis says
+    which of them is the Booth-encoded multiplier.
+    """
+    sm = getattr(tile, 'sign_mode', 'uu') or 'uu'
+    sa, sb = (sm[0] == 's'), (sm[1] == 's')
+    if tile.booth_axis == 'a':        # a is the multiplier, b the multiplicand
+        return sb, sa
+    return sa, sb
+
+
+def booth_tile_depth(level, groups, nb, carry_w=4):
+    """Carry-chain depth of a grouped band, in carry primitives.
+
+    A group of L/G levels is L/G carry-propagate adds deep, and recombining G
+    group sums is ceil(log2 G) more; each add ripples over nb bits, i.e.
+    nb/carry_w primitives.  This is a proxy, not a timing model -- it is
+    monotone in the thing that actually dominates the measured critical path of
+    a logic-only design, which is what Step 1 needs it to be.
+    """
+    import math
+    G = max(1, int(groups))
+    levels_deep = -(-level // G)                       # ceil
+    combine_deep = int(math.ceil(math.log(G, 2))) if G > 1 else 0
+    return (levels_deep + combine_deep) * -(-nb // carry_w)
 
 
 def dsp_tile_cost():
     return 0   # DSP costs no LUTs; constrained by --max-dsp instead
 
 
-def _band_anchors(axis_len, h_uns, h_sgn, dsp_dims):
+def _band_anchors(axis_len, heights, dsp_dims):
     """Encoded-axis anchor positions for band-aligned Booth enumeration.
 
     Same-height Booth tiles stack, so in any packing their anchors lie on a grid
-    stepped by the unsigned band height.  We seed that grid from a few bases:
-    the LSB edge (0), the MSB-owning top band (axis_len - h for each height),
-    and -- when DSPs are allowed -- just above a DSP of each possible extent (so
-    a Booth band can sit on the DSP corner).  This cuts the encoded-axis
-    positions from O(W) to O(W / h_uns) without losing the optimum in practice;
-    the LUT residual still absorbs whatever a band misses.
+    stepped by one of the admissible band heights.  We seed those grids from a
+    few bases: the LSB edge (0), the MSB-owning top band (axis_len - h for each
+    height), and -- when DSPs are allowed -- just above a DSP of each possible
+    extent (so a Booth band can sit on the DSP corner).  This cuts the
+    encoded-axis positions from O(W) to O(W / h_min) without losing the optimum
+    in practice; the LUT residual still absorbs whatever a band misses.
+
+    'heights' is the set of admissible band heights of the level(s) being
+    enumerated -- both the full height 2L-1 / 2L and the one-row-shorter band
+    that still needs exactly L Booth digits (see enumerate_candidate_tiles).
     """
-    bases = {0, axis_len - h_uns, axis_len - h_sgn}
+    heights = sorted({int(h) for h in heights if h >= 1})
+    bases = {0}
+    for h in heights:
+        bases.add(axis_len - h)
     for d in dsp_dims:
         bases.add(d)
     anchors = set()
-    for base in bases:
-        a = base
-        while a >= 0:
-            anchors.add(a)
-            a -= h_uns
-        a = base + h_uns
-        while a <= axis_len:
-            anchors.add(a)
-            a += h_uns
+    for step in heights:
+        for base in bases:
+            a = base
+            while a >= 0:
+                anchors.add(a)
+                a -= step
+            a = base + step
+            while a <= axis_len:
+                anchors.add(a)
+                a += step
     return {a for a in anchors if 0 <= a <= axis_len}
 
 
@@ -555,12 +652,39 @@ def _mcand_intervals(boundaries, kmin, kmax):
     return out
 
 
+def _group_choices(level, nb, booth_groups, max_tile_depth):
+    """Group counts worth enumerating for one band placement.
+
+    None means Step 1 is not choosing: one candidate is produced with its group
+    count unset, and the emitter's module-level default decides.  That keeps
+    every caller that predates the group knob emitting exactly what it used to.
+
+    Otherwise a group count only earns a candidate if it is feasible (no more
+    groups than levels) and, when a depth ceiling is in force, if the band
+    actually fits under it.  Duplicates are dropped so that two group counts
+    that round to the same shape do not double the candidate set for nothing.
+    """
+    if booth_groups is None:
+        return [None]
+    seen, out = set(), []
+    for g in booth_groups:
+        g = max(1, min(int(g), level))
+        if g in seen:
+            continue
+        seen.add(g)
+        if max_tile_depth is not None and                 booth_tile_depth(level, g, nb) > max_tile_depth:
+            continue
+        out.append(g)
+    return out
+
+
 def enumerate_candidate_tiles(Wa, Wb, sign_a, sign_b,
                               booth_level, allow_dsp,
                               dsp_unsigned=DSP_UNSIGNED, dsp_signed=DSP_SIGNED,
                               booth_min_k=4, booth_max_k=None,
                               include_lut=True, booth_band_align=False,
-                              booth_width_prune=False):
+                              booth_width_prune=False,
+                              booth_groups=None, max_tile_depth=None):
     """Generate candidate tile placements covering sub-rectangles of the
     Wa x Wb board.  Only Booth tiles of the *configured* level are produced
     (per the requirement: 'if level=7, only level-7 Booth tiles').
@@ -612,8 +736,7 @@ def enumerate_candidate_tiles(Wa, Wb, sign_a, sign_b,
         for d in dsp_axis[1]:
             Bb |= {d, Wb - d}
         for L in levels:
-            for h in (booth_level_max_height(L, False),
-                      booth_level_max_height(L, True)):
+            for h in booth_level_heights(L):
                 Ba |= {h, Wa - h}
                 Bb |= {h, Wb - h}
         Ba = {x for x in Ba if 0 <= x <= Wa}
@@ -627,56 +750,66 @@ def enumerate_candidate_tiles(Wa, Wb, sign_a, sign_b,
                    for j0 in range(0, Wb - kk + 1)]
 
     for L in levels:
-        h_uns = booth_level_max_height(L, False)     # 2L-1
-        h_sgn = booth_level_max_height(L, True)      # 2L
-        a_anchors = _band_anchors(Wa, h_uns, h_sgn, dsp_axis[0]) \
+        # A level-L band spends L Booth digits, hence costs L*(k+1) LUTs, for
+        # EVERY encoded height whose digit count is L: {2L-2, 2L-1} unsigned
+        # and {2L-1, 2L} signed (booth_digits_needed()).  Enumerating the
+        # shorter band as well as the maximal one is what lets a level tile an
+        # axis length of either parity exactly, instead of always leaving a
+        # one-row residual strip behind on the mismatched parity.
+        all_h = booth_level_heights(L)
+        a_anchors = _band_anchors(Wa, all_h, dsp_axis[0]) \
             if booth_band_align else None
-        b_anchors = _band_anchors(Wb, h_uns, h_sgn, dsp_axis[1]) \
+        b_anchors = _band_anchors(Wb, all_h, dsp_axis[1]) \
             if booth_band_align else None
 
-        # orientation 'a': operand a is the Booth multiplier (height), b mcand
-        a_heights = {h_uns}
+        # (height, is_signed_band) specs.  A signed band is legal only when it
+        # owns the MSB of a globally signed operand; an unsigned band must not.
+        a_specs = [(h, False) for h in booth_level_unsigned_heights(L)]
         if sign_a:
-            a_heights.add(h_sgn)
-        for hh in a_heights:
-            if hh > Wa:
+            a_specs += [(h, True) for h in booth_level_signed_heights(L)]
+        b_specs = [(h, False) for h in booth_level_unsigned_heights(L)]
+        if sign_b:
+            b_specs += [(h, True) for h in booth_level_signed_heights(L)]
+
+        # orientation 'a': operand a is the Booth multiplier (height), b mcand
+        for hh, want_signed in a_specs:
+            if hh > Wa or hh < 1:
                 continue
             i0_list = (sorted(a for a in a_anchors if a <= Wa - hh)
                        if booth_band_align else range(0, Wa - hh + 1))
             for i0 in i0_list:
                 top_signed = sign_a and (i0 + hh - 1 == Wa - 1)
-                # signed height only valid when it owns the MSB; an unsigned
-                # height must NOT own a signed MSB.
-                if hh == h_sgn and not top_signed:
-                    continue
-                if hh == h_uns and top_signed and h_uns != h_sgn:
+                if top_signed != want_signed:
                     continue
                 for (j0, kk) in mcand_b:
                     if j0 + kk <= Wb:
-                        tiles.append(Tile('BOOTH', i0, i0 + hh - 1,
-                                          j0, j0 + kk - 1,
-                                          booth_axis='a', level=L))
+                        for G in _group_choices(L, hh + kk, booth_groups,
+                                                max_tile_depth):
+                            tiles.append(Tile('BOOTH', i0, i0 + hh - 1,
+                                              j0, j0 + kk - 1,
+                                              booth_axis='a', level=L,
+                                              groups=G))
 
         # orientation 'b': operand b is the Booth multiplier
-        b_heights = {h_uns}
-        if sign_b:
-            b_heights.add(h_sgn)
-        for hh in b_heights:
-            if hh > Wb:
+        for hh, want_signed in b_specs:
+            if hh > Wb or hh < 1:
                 continue
             j0_list = (sorted(b for b in b_anchors if b <= Wb - hh)
                        if booth_band_align else range(0, Wb - hh + 1))
             for j0 in j0_list:
                 top_signed = sign_b and (j0 + hh - 1 == Wb - 1)
-                if hh == h_sgn and not top_signed:
-                    continue
-                if hh == h_uns and top_signed and h_uns != h_sgn:
+                if top_signed != want_signed:
                     continue
                 for (i0, kk) in mcand_a:
                     if i0 + kk <= Wa:
-                        tiles.append(Tile('BOOTH', i0, i0 + kk - 1,
-                                          j0, j0 + hh - 1,
-                                          booth_axis='b', level=L))
+                        for G in _group_choices(L, hh + kk,
+                                                booth_groups,
+                                                max_tile_depth):
+                            tiles.append(Tile('BOOTH', i0,
+                                              i0 + kk - 1,
+                                              j0, j0 + hh - 1,
+                                              booth_axis='b',
+                                              level=L, groups=G))
 
     # ---- DSP tiles ----
     if allow_dsp:
@@ -706,7 +839,10 @@ def enumerate_candidate_tiles(Wa, Wb, sign_a, sign_b,
     seen = set()
     uniq = []
     for t in tiles:
-        key = (t.kind, t.i0, t.i1, t.j0, t.j1, t.booth_axis, t.level)
+        # groups belongs in the key: the same band at two group counts is two
+        # different tiles, one deeper and cheaper than the other, and leaving it
+        # out silently collapsed every variant onto the first one enumerated.
+        key = (t.kind, t.i0, t.i1, t.j0, t.j1, t.booth_axis, t.level, t.groups)
         if key not in seen:
             seen.add(key)
             uniq.append(t)
