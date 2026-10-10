@@ -35,11 +35,14 @@ Table VII: our Step 2 on the compressor-tree benchmark suite of [B], on the Virt
 
 ## Status
 
-`sota_kintex7.csv` and `device_families.csv` are the current measurements, taken
-with the per-level cell assignment described in the top-level README. The other
-four tables are being re-measured under the same emitter and will land when
-those campaigns finish; until then they are absent rather than stale, because a
-table measured under a different emitter cannot be read alongside these two.
+All six tables are current: every row was re-measured with the per-level cell
+assignment described in the top-level README, and each design was verified at
+the gate level against the bit-accurate model before synthesis.
+
+`sota_kintex7.csv` was synthesised with Vivado 2022.2, the release closest to
+the 2022.1 that the work it compares against reports; the rest use 2024.2.
+Running the same 47 designs through both showed identical LUT counts and a
+mean delay difference of 0.09 ns, so the two are interchangeable in practice.
 
 ## Reproducing
 

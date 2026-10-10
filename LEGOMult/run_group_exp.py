@@ -30,7 +30,13 @@ import sys
 import time
 
 SDIR = os.path.dirname(os.path.abspath(__file__))
-SYNTH_BAT = os.path.join(SDIR, "synth.bat")
+# synth.bat clears the .Xil directory of whatever it runs in, so two
+# concurrent campaigns on one host knock each other over.  Point
+# LEGO_SYNTH_BAT at a private copy of synth.bat + synth.tcl and the
+# job gets its own working directory as well.
+SYNTH_BAT = os.environ.get("LEGO_SYNTH_BAT",
+                           os.path.join(SDIR, "synth.bat"))
+SYNTH_CWD = os.path.dirname(SYNTH_BAT)
 PART = "xc7k70tfbv484-3"            # the device of [33], as Table VI uses
 
 
@@ -144,8 +150,9 @@ def main():
                                "verified": vok, "n_vectors": nvec},
                               open(jf, "w"), indent=2)
                     env = dict(os.environ, PART=PART)
-                    subprocess.run(["cmd", "/c", SYNTH_BAT, vf, "comb", "3.0"],
-                                   cwd=SDIR, env=env, stdout=subprocess.PIPE,
+                    subprocess.run(["cmd", "/c", SYNTH_BAT,
+                                    os.path.abspath(vf), "comb", "3.0"],
+                                   cwd=SYNTH_CWD, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT)
 
                 m = read_metrics(mf)

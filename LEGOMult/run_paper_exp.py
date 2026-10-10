@@ -29,7 +29,13 @@ import time
 
 SDIR = os.path.dirname(os.path.abspath(__file__))
 PYEXE = r"C:\gurobi1001\win64\python37\bin\python.exe"
-SYNTH_BAT = os.path.join(SDIR, "synth.bat")
+# synth.bat clears the .Xil directory of whatever it runs in, so two
+# concurrent campaigns on one host knock each other over.  Point
+# LEGO_SYNTH_BAT at a private copy of synth.bat + synth.tcl and the
+# job gets its own working directory as well.
+SYNTH_BAT = os.environ.get("LEGO_SYNTH_BAT",
+                           os.path.join(SDIR, "synth.bat"))
+SYNTH_CWD = os.path.dirname(SYNTH_BAT)
 
 PART_K7 = "xc7k70tfbv484-3"        # the device [C] reports on
 PART_S7 = "xc7s100fgga676-2"       # the paper's edge target (SP701)
@@ -192,8 +198,9 @@ def run_one(c, outroot, force=False):
         env = dict(os.environ)
         env["PART"] = c["part"]
         t0 = time.time()
-        p = subprocess.run(["cmd", "/c", SYNTH_BAT, vfile, c["smode"],
-                            str(c["period"])], cwd=SDIR, env=env,
+        p = subprocess.run(["cmd", "/c", SYNTH_BAT,
+                            os.path.abspath(vfile), c["smode"],
+                            str(c["period"])], cwd=SYNTH_CWD, env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         synth_s = time.time() - t0
         with open(os.path.join(od, "synth.log"), "w", encoding="utf-8") as fh:
