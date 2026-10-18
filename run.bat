@@ -13,12 +13,18 @@ REM     run.bat 12x16 8 carry     (Wa=12 Wb=16 S=8)
 REM     run.bat 3x7 3
 REM ============================================================
 
-set PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+set PYEXE=%LEGO_PYEXE%
 set SCRIPT_DIR=%~dp0
 
+if "%PYEXE%"=="" (
+    echo [ERROR] LEGO_PYEXE is not set.
+    echo         Point it at the interpreter that can import gurobipy:
+    echo             set LEGO_PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+    pause
+    exit /b 1
+)
 if not exist "%PYEXE%" (
-    echo [ERROR] Cannot find %PYEXE%
-    echo         Please update PYEXE in run.bat to point to your gurobi python.
+    echo [ERROR] LEGO_PYEXE does not exist: %PYEXE%
     pause
     exit /b 1
 )

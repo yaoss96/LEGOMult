@@ -435,18 +435,14 @@ def solve_tiling(Wa, Wb, sign_a=False, sign_b=False,
         import gurobipy as gp
         from gurobipy import GRB
     except Exception as e:
-        if verbose:
-            print("[tiling] gurobipy unavailable (%s); using greedy." % e)
-        tiles = greedy_tiling(Wa, Wb, sign_a, sign_b, booth_level, max_dsp)
-        tiles = retile_lut_residual(tiles, Wa, Wb, booth_level)
-        info['method'] = 'greedy(no-gurobi)'
-        wpp_obj, wpp, booth_lut = tiling_step1_objective_cost(tiles)
-        cc_total = tiling_colcost(tiles, Wa, Wb)[0]
-        info['weighted_pp_cost'] = wpp
-        info['booth_own_lut_cost'] = booth_lut
-        info['colcost'] = cc_total
-        info['cost'] = cc_total if cost_model == 'colcost' else wpp_obj
-        return tiles, info
+        raise RuntimeError(
+            "Step 1 needs Gurobi, but gurobipy could not be imported (%s). "
+            "Install it, or run under the interpreter that has it. "
+            "To ask for the greedy tiling on purpose, pass --tiling-gurobi "
+            "off. Greedy is not what the paper measures: it packs low-level "
+            "Booth bands and hands Step 2 a much taller heap, so a run that "
+            "quietly substitutes it reports a design the method never "
+            "produced." % e)
 
     try:
         m = gp.Model("tiling_%dx%d" % (Wa, Wb))
@@ -578,18 +574,18 @@ def solve_tiling(Wa, Wb, sign_a=False, sign_b=False,
         info['status'] = m.Status
         return tiles, info
     except Exception as e:
-        if verbose:
-            print("[tiling] ILP failed (%s); falling back to greedy." % str(e)[:140])
-        tiles = greedy_tiling(Wa, Wb, sign_a, sign_b, booth_level, max_dsp)
-        tiles = retile_lut_residual(tiles, Wa, Wb, booth_level)
-        info['method'] = 'greedy(ilp-fail)'
-        wpp_obj, wpp, booth_lut = tiling_step1_objective_cost(tiles)
-        cc_total = tiling_colcost(tiles, Wa, Wb)[0]
-        info['weighted_pp_cost'] = wpp
-        info['booth_own_lut_cost'] = booth_lut
-        info['colcost'] = cc_total
-        info['cost'] = cc_total if cost_model == 'colcost' else wpp_obj
-        return tiles, info
+        # Deliberately not a fallback.  Substituting greedy here changes the
+        # design while leaving the exit status, the artefacts and the netlist
+        # verification all looking healthy, so the failure is invisible in
+        # everything except the method field of the report.  Out of memory is
+        # the usual cause at large W, where the candidate set runs to hundreds
+        # of thousands of placements.
+        raise RuntimeError(
+            "Step 1 ILP failed (%s). Give the solve more memory (run fewer "
+            "in parallel, or set Gurobi's NodefileStart to spill the search "
+            "tree to disk), narrow --booth-levels to shrink the candidate "
+            "set, or pass --tiling-gurobi off to ask for greedy on purpose."
+            % str(e)[:200])
 
 
 def _assert_exact_cover(tiles, Wa, Wb):

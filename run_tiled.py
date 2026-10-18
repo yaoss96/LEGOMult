@@ -295,6 +295,11 @@ def main():
     t1 = time.time()
     merge_res = None
     if a.merge in ("auto", "ilp"):
+        # "auto" used to swallow this and carry on with greedy.  That produced
+        # a different compressor tree while the run still exited 0 and the
+        # netlist still verified, so the substitution was visible only in the
+        # method field.  Both modes now fail loudly; --merge greedy is how you
+        # ask for the Gurobi-free reduction.
         try:
             merge_res = solve_merge(heap, S=a.step2_steps,
                                     use_lut_carry=not a.no_lut_carry,
@@ -302,9 +307,9 @@ def main():
                                     threads=a.threads, time_limit=a.time_limit,
                                     mip_gap=a.mip_gap, verbose=verbose)
         except Exception as e:
-            print("[Step 2] ILP merge unavailable (%s)" % str(e)[:90])
-            if a.merge == "ilp":
-                raise
+            raise RuntimeError(
+                "Step 2 ILP merge failed (%s). Pass --merge greedy to ask for "
+                "the Gurobi-free reduction on purpose." % str(e)[:200])
     if merge_res is None:
         merge_res = greedy_merge(heap)
         print("[Step 2] using greedy full/half-adder reduction (Gurobi-free).")

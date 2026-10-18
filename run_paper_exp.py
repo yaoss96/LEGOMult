@@ -28,7 +28,37 @@ import sys
 import time
 
 SDIR = os.path.dirname(os.path.abspath(__file__))
-PYEXE = r"C:\gurobi1001\win64\python37\bin\python.exe"
+
+
+def _gurobi_python():
+    """The interpreter that can import gurobipy.
+
+    Set LEGO_PYEXE to it.  Falling back to whatever python happens to be on
+    PATH is what this function exists to prevent: run_tiled.py would start,
+    fail to import gurobipy, and -- before both ILPs were made to fail loudly
+    -- quietly produce a greedy design that still exits 0 and still verifies.
+    An interpreter that cannot import gurobipy is rejected here rather than
+    hours later in the numbers.
+    """
+    exe = os.environ.get("LEGO_PYEXE")
+    if not exe:
+        raise SystemExit(
+            "LEGO_PYEXE is not set. Point it at the interpreter that can "
+            "import gurobipy, e.g.\n"
+            "    set LEGO_PYEXE=C:\\gurobi1001\\win64\\python37\\bin\\python.exe\n"
+            "    export LEGO_PYEXE=/opt/gurobi1001/linux64/bin/python3.7")
+    if not os.path.exists(exe):
+        raise SystemExit("LEGO_PYEXE does not exist: %s" % exe)
+    probe = subprocess.run([exe, "-c", "import gurobipy"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if probe.returncode != 0:
+        raise SystemExit(
+            "LEGO_PYEXE cannot import gurobipy: %s\n%s"
+            % (exe, probe.stdout.decode("utf-8", "replace").strip()[:400]))
+    return exe
+
+
+PYEXE = _gurobi_python()
 # synth.bat clears the .Xil directory of whatever it runs in, so two
 # concurrent campaigns on one host knock each other over.  Point
 # LEGO_SYNTH_BAT at a private copy of synth.bat + synth.tcl and the

@@ -17,11 +17,17 @@ REM  Notes: behavioural DSP `*` and (* use_dsp *) are simulated natively by
 REM  iverilog; LUT6/LUT6_2/CARRY4 use the bundled sim models.
 REM ============================================================
 
-set PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+set PYEXE=%LEGO_PYEXE%
 set SCRIPT_DIR=%~dp0
 
+if "%PYEXE%"=="" (
+    echo [ERROR] LEGO_PYEXE is not set.
+    echo         Point it at the interpreter that can import gurobipy:
+    echo             set LEGO_PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+    exit /b 1
+)
 if not exist "%PYEXE%" (
-    echo [ERROR] Cannot find %PYEXE%  -- update PYEXE in test_tiled.bat.
+    echo [ERROR] LEGO_PYEXE does not exist: %PYEXE%
     exit /b 1
 )
 

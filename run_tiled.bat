@@ -27,12 +27,17 @@ REM     run_tiled.bat 24x18 4 2 su
 REM     run_tiled.bat 32 mix 1 ss 8    (32x32, force Step-2 step budget S=8)
 REM ============================================================
 
-set PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+set PYEXE=%LEGO_PYEXE%
 set SCRIPT_DIR=%~dp0
 
+if "%PYEXE%"=="" (
+    echo [ERROR] LEGO_PYEXE is not set.
+    echo         Point it at the interpreter that can import gurobipy:
+    echo             set LEGO_PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+    exit /b 1
+)
 if not exist "%PYEXE%" (
-    echo [ERROR] Cannot find %PYEXE%
-    echo         Update PYEXE in run_tiled.bat to point to your Gurobi python.
+    echo [ERROR] LEGO_PYEXE does not exist: %PYEXE%
     exit /b 1
 )
 

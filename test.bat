@@ -62,10 +62,15 @@ set VFILE=ilp_mult_!NAME_TAG!_S%S%.v
 set TBFILE=ilp_mult_!NAME_TAG!_S%S%_exhaustive_tb.v
 set OUTFILE=/tmp/ilp_mult_!NAME_TAG!_S%S%_exhaustive_tb.out
 
-set PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+set PYEXE=%LEGO_PYEXE%
+if "%PYEXE%"=="" (
+    echo [ERROR] LEGO_PYEXE is not set.
+    echo         Point it at the interpreter that can import gurobipy:
+    echo             set LEGO_PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+    exit /b 1
+)
 if not exist "%PYEXE%" (
-    echo [ERROR] Cannot find %PYEXE%
-    echo         Please update PYEXE in test.bat.
+    echo [ERROR] LEGO_PYEXE does not exist: %PYEXE%
     exit /b 1
 )
 

@@ -28,12 +28,14 @@ behavioural signed/unsigned `*` carrying `(* use_dsp="yes" *)` so Vivado infers 
 python -m pip install -r requirements.txt   # gurobipy is OPTIONAL (see below)
 ```
 
-* **No dependencies required** for the greedy fallback path — the core flow runs
-  on the Python standard library alone.
-* **Gurobi + gurobipy** (with a license) enables the exact, LUT-optimal ILP
-  solves. Without it, LEGOMult prints a notice and automatically falls back to a
-  deterministic greedy tiler / greedy FA-HA merge that still emits verified,
-  primitive-only RTL.
+* **Gurobi + gurobipy** (with a license) is what the paper measures. Both ILPs
+  **fail loudly** if it is missing or a solve dies: they do not fall back.
+  A silent substitution is indistinguishable from success — the run still exits
+  0 and the netlist still verifies — while the design it reports is not the one
+  the method produces.
+* **The greedy path is opt-in**, via `--tiling-gurobi off --merge greedy`. It
+  needs no dependencies beyond the standard library and still emits verified,
+  primitive-only RTL, but its numbers are not the paper's.
 * **Icarus Verilog** (`iverilog`/`vvp`) is optional, for RTL simulation of the
   generated testbench against the bundled `LUT6.v` / `LUT6_2.v` / `CARRY4.v`
   primitive models.
@@ -112,13 +114,42 @@ Part / Vivado path default to Kintex-7 `xc7k70tfbv484-3`; override `PART` /
 `VIVADO` before the call. `SliceLUT` (LUT-combining aware) is the area number to
 report; pair it with `CPD` from a `reg`-mode run for the area–latency Pareto.
 
+`MODE` is `comb`, `reg` or `impl`. `comb` and `reg` stop after synthesis, which
+is optimistic by roughly a third on delay; `impl` carries on through
+`place_design` and `route_design`, which is what you need to compare against
+work that reports implemented numbers.
+
+**Calling Vivado directly:** use `synth_warm.tcl`, not `synth.tcl`.
+
+```bash
+vivado -mode batch -source synth_warm.tcl -tclargs mult.v xc7s100fgga676-2 reg 20.0
+```
+
+A fresh `vivado -mode batch` session fails its *first* `synth_design` with
+`couldn't read file ".../unimacro/unimacro_vhdl.tcl": No error`, because the
+helper process that spawns child Vivados is not ready yet. `synth_warm.tcl`
+absorbs that with a throw-away synthesis and then sources `synth.tcl`
+unchanged. `synth.bat` already does its own warm-up, so it needs no wrapper.
+
 ## Windows launchers (`.bat`)
 
 `run.bat`, `run_tiled.bat`, `test.bat`, `test_tiled.bat` are Windows convenience
-wrappers. They call `run_tiled.py` via a `PYEXE` variable that defaults to a
-Gurobi Python install — **edit `PYEXE` at the top of each `.bat`** to point at
-your own Python (e.g. `set PYEXE=python`). `test_tiled.bat` also drives
-`iverilog`/`vvp` inside WSL. On Linux/macOS just call the Python scripts directly.
+wrappers. They take the interpreter from **`LEGO_PYEXE`**, which must point at
+a Python that can import `gurobipy`, and refuse to start if it is unset or
+missing. `run_paper_exp.py` reads the same variable and additionally probes the
+import, so a wrong interpreter is rejected up front rather than hours later in
+the numbers.
+
+```bat
+set LEGO_PYEXE=C:\gurobi1001\win64\python37\bin\python.exe
+```
+
+```bash
+export LEGO_PYEXE=/opt/gurobi1001/linux64/bin/python3.7
+```
+
+`test_tiled.bat` also drives `iverilog`/`vvp` inside WSL. On Linux/macOS just
+call the Python scripts directly.
 
 ## Correctness / verification
 
@@ -284,8 +315,8 @@ it. Two traps worth knowing:
 |------|------|
 | `run_tiled.py` | end-to-end two-step driver (Step1→Step2→RTL→TB→verify) |
 | `tiles.py` | tile set (DSP, Booth level-L, level-bounded LUT residuals) + exact PP model |
-| `tiling_ilp.py` | **Step 1** set-partition tiling ILP (Gurobi) + greedy fallback |
-| `merge_ilp.py` | **Step 2** LUT+CARRY4 compressor-tree ILP + greedy FA/HA fallback |
+| `tiling_ilp.py` | **Step 1** set-partition tiling ILP (Gurobi); opt-in greedy tiler |
+| `merge_ilp.py` | **Step 2** LUT+CARRY4 compressor-tree ILP; opt-in greedy FA/HA merge |
 | `booth_array.py` | radix-4 Booth ARRAY (LUT6 encode + CARRY4 accumulate) |
 | `tiled_verilog_gen.py` | structural RTL: DSP48 + Booth arrays + merge LUT6_2/CARRY4 |
 | `tiled_pysim.py` | Python golden model (tiling→heap→reduction→CLA) checked vs `a*b` |
@@ -294,6 +325,7 @@ it. Two traps worth knowing:
 | `run.py` | single-stage compressor-tree ILP baseline |
 | `compressors.py`, `signed_support.py`, `verilog_gen.py`, `ilp_solver.py` | shared compressor library, Baugh–Wooley sign support, RTL emitters, single-stage ILP |
 | `generate_exhaustive_tb.py` | exhaustive Verilog testbench generator |
+| `synth.tcl`, `synth_warm.tcl` | Vivado synthesis (`comb`/`reg`/`impl`); the wrapper adds the batch warm-up |
 | `LUT6.v`, `LUT6_2.v`, `CARRY4.v` | primitive simulation models for iverilog |
 
 ## License
